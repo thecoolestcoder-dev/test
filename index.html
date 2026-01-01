@@ -10,8 +10,8 @@
         /* The DVD Logo */
         #dvd-logo {
             position: absolute;
-            width: 100px;
-            height: 50px;
+            width: 100px; /* Logo Width */
+            height: 50px; /* Logo Height */
             background: blue;
             color: white;
             font-weight: bold;
@@ -36,36 +36,56 @@
             justify-content: center;
             z-index: 100;
         }
-        h2 { margin-bottom: 20px; text-align: center; }
+        h2 { margin-bottom: 10px; text-align: center; font-size: 1.2rem; }
+        p.instruct { color: #aaa; font-size: 0.9rem; margin-bottom: 20px; text-align: center; max-width: 80%;}
         
         .grid-container {
             display: grid;
-            grid-template-columns: repeat(3, 80px); /* 3 columns, 80px wide */
-            gap: 10px;
+            grid-template-columns: repeat(3, 70px);
+            grid-template-rows: repeat(3, 70px);
+            gap: 8px;
             background: #222;
             padding: 10px;
             border-radius: 10px;
+            margin-bottom: 20px;
         }
         
         .grid-box {
-            width: 80px; height: 80px;
+            width: 70px; height: 70px;
             background: #333;
             border: 2px solid #555;
             cursor: pointer;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 24px;
-            border-radius: 8px;
+            font-size: 18px;
+            border-radius: 6px;
             user-select: none;
+            transition: background 0.2s;
         }
-        .grid-box:hover { background: #444; border-color: #fff; }
-        .grid-box.taken { background: #500; border-color: #f00; cursor: not-allowed; opacity: 0.5; }
+        
+        /* States for the grid boxes */
+        .grid-box.selected { background: #2ecc71; border-color: #27ae60; color: #000; font-weight: bold; }
+        .grid-box.taken { background: #c0392b; border-color: #e74c3c; opacity: 0.4; cursor: not-allowed; }
+
+        #join-btn {
+            padding: 15px 30px;
+            font-size: 18px;
+            background: #3498db;
+            color: white;
+            border: none;
+            border-radius: 30px;
+            cursor: pointer;
+            opacity: 0.5;
+            pointer-events: none;
+            transition: opacity 0.3s;
+        }
+        #join-btn.ready { opacity: 1; pointer-events: all; }
         
         #status {
             position: fixed; bottom: 10px; right: 10px;
             color: gray; font-size: 10px; pointer-events: none;
-            z-index: 50;
+            z-index: 50; text-align: right;
         }
     </style>
 </head>
@@ -74,10 +94,14 @@
     <div id="dvd-logo" style="display:none;">DVD</div>
 
     <div id="setup-screen">
-        <h2>Select this device's<br>position in the wall</h2>
+        <h2>Setup Video Wall</h2>
+        <p class="instruct">Tap the squares that this device covers.<br>(e.g. 2 squares for a wide tablet)</p>
+        
         <div class="grid-container" id="grid"></div>
-        <p style="margin-top:20px; color: #888; font-size: 0.8em;">(Row, Column)</p>
-        <p id="error-msg" style="color: red; display: none; margin-top: 10px;">Error: Check Firebase Config</p>
+        
+        <button id="join-btn" onclick="joinWall()">JOIN WALL</button>
+
+        <p id="error-msg" style="color: red; display: none; margin-top: 10px; font-size: 0.8rem;">Error: Check Firebase Config</p>
     </div>
 
     <div id="status">Waiting for setup...</div>
@@ -86,165 +110,233 @@
     <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
 
     <script>
-        // --- 1. DRAW THE GRID FIRST (So UI always loads) ---
-        function createGrid() {
+        // --- CONFIGURATION ---
+        const firebaseConfig = {
+            apiKey: "PASTE_API_KEY_HERE", 
+            authDomain: "PASTE_AUTH_DOMAIN_HERE",
+            databaseURL: "PASTE_DATABASE_URL_HERE",
+            projectId: "PASTE_PROJECT_ID_HERE",
+            storageBucket: "PASTE_BUCKET_HERE",
+            messagingSenderId: "PASTE_SENDER_ID_HERE",
+            appId: "PASTE_APP_ID_HERE"
+        };
+        // ---------------------
+
+        // Global State
+        const GRID_SIZE = 3; 
+        const myId = 'device_' + Math.random().toString(36).substr(2, 9);
+        let db, devicesRef, syncRef;
+        let allDevices = {};
+        
+        // My Local State
+        let selectedCells = []; // Stores "row-col" strings
+        let myGeometry = null;  // Will hold { row, col, spanR, spanC }
+
+        // --- 1. SETUP & UI ---
+        
+        function initGrid() {
             const gridEl = document.getElementById('grid');
-            if(!gridEl) return;
             gridEl.innerHTML = '';
             
-            for (let r = 0; r < 3; r++) {
-                for (let c = 0; c < 3; c++) {
+            for (let r = 0; r < GRID_SIZE; r++) {
+                for (let c = 0; c < GRID_SIZE; c++) {
                     const div = document.createElement('div');
                     div.className = 'grid-box';
-                    div.innerText = `${r},${c}`;
-                    div.onclick = () => selectPosition(r, c);
                     div.id = `slot-${r}-${c}`;
+                    div.innerText = `${r},${c}`;
+                    div.onclick = () => toggleCell(r, c);
                     gridEl.appendChild(div);
                 }
             }
         }
-        // Run this immediately!
-        createGrid();
+        initGrid();
 
+        function toggleCell(r, c) {
+            const id = `${r}-${c}`;
+            const el = document.getElementById(`slot-${r}-${c}`);
+            
+            // Don't allow clicking taken spots
+            if (el.classList.contains('taken')) return;
 
-        /**
-         * -----------------------------------------------------------
-         * CONFIGURATION 
-         * -----------------------------------------------------------
-         */
-        const firebaseConfig = {
-  apiKey: "AIzaSyDFFIM-hOCR8BHL9W_ji8NJwLZH0OleAQ0",
-  authDomain: "dvdlogothingy.firebaseapp.com",
-  databaseURL: "https://dvdlogothingy-default-rtdb.firebaseio.com",
-  projectId: "dvdlogothingy",
-  storageBucket: "dvdlogothingy.firebasestorage.app",
-  messagingSenderId: "203177996220",
-  appId: "1:203177996220:web:5d95399673795bd9da05b9"
-};
+            if (selectedCells.includes(id)) {
+                selectedCells = selectedCells.filter(x => x !== id);
+                el.classList.remove('selected');
+            } else {
+                selectedCells.push(id);
+                el.classList.add('selected');
+            }
+            
+            // Enable button if selection exists
+            const btn = document.getElementById('join-btn');
+            if (selectedCells.length > 0) btn.classList.add('ready');
+            else btn.classList.remove('ready');
+        }
 
-        // -----------------------------------------------------------
-
-
-        // Initialize Firebase safely
-        let db, devicesRef, syncRef;
-        const myId = 'device_' + Math.random().toString(36).substr(2, 9);
-        let allDevices = {};
-        let myPosition = null;
+        // --- 2. FIREBASE CONNECTION ---
 
         try {
             firebase.initializeApp(firebaseConfig);
             db = firebase.database();
             devicesRef = db.ref('devices');
             syncRef = db.ref('syncState');
-            console.log("Firebase connected successfully");
-        } catch (e) {
-            console.error("Firebase Error:", e);
-            document.getElementById('error-msg').style.display = 'block';
-            document.getElementById('error-msg').innerText = "Error: Firebase config is missing or wrong. Check console.";
-        }
-
-        // --- DVD LOGIC ---
-        const DVD_WIDTH = 100;
-        const DVD_HEIGHT = 50;
-        const SPEED_X = 0.2; 
-        const SPEED_Y = 0.2; 
-
-        function selectPosition(row, col) {
-            if (!db) { alert("Database not connected! Check your code config."); return; }
-
-            myPosition = { r: row, c: col };
             
-            const deviceData = {
-                id: myId, row: row, col: col,
-                width: window.innerWidth, height: window.innerHeight,
-                timestamp: firebase.database.ServerValue.TIMESTAMP
-            };
-
-            devicesRef.child(myId).set(deviceData).then(() => {
-                document.getElementById('setup-screen').style.display = 'none';
-                document.getElementById('dvd-logo').style.display = 'flex';
-                initSync();
-            });
-
-            window.onresize = () => {
-                devicesRef.child(myId).update({ width: window.innerWidth, height: window.innerHeight });
-            };
-            devicesRef.child(myId).onDisconnect().remove();
-        }
-
-        if (devicesRef) {
+            // Listen for other devices
             devicesRef.on('value', (snapshot) => {
                 const data = snapshot.val();
                 if(!data) return;
                 
-                // Update grid visual
+                // Clear 'taken' visual state first
                 document.querySelectorAll('.grid-box').forEach(el => el.classList.remove('taken'));
+                
                 Object.values(data).forEach(device => {
-                    const el = document.getElementById(`slot-${device.row}-${device.col}`);
-                    if (el && device.id !== myId) el.classList.add('taken');
+                    // Mark occupied cells as taken
+                    if (device.id !== myId) {
+                        for(let r = device.row; r < device.row + device.spanR; r++) {
+                            for(let c = device.col; c < device.col + device.spanC; c++) {
+                                const el = document.getElementById(`slot-${r}-${c}`);
+                                if (el) el.classList.add('taken');
+                            }
+                        }
+                    }
                 });
                 allDevices = data;
             });
+            
+        } catch (e) {
+            console.error(e);
+            document.getElementById('error-msg').style.display = 'block';
         }
 
-        function initSync() {
-            syncRef.child('startTime').transaction((current) => {
-                return current || Date.now();
-            }, (error, committed, snapshot) => {
-                startAnimationLoop(snapshot.val() || Date.now());
+        // --- 3. LOGIC: JOINING THE WALL ---
+
+        function joinWall() {
+            if (selectedCells.length === 0) return;
+
+            // Calculate Bounding Box of selection
+            // (If user selects (0,0) and (0,2), we assume they cover (0,1) too)
+            let rows = selectedCells.map(s => parseInt(s.split('-')[0]));
+            let cols = selectedCells.map(s => parseInt(s.split('-')[1]));
+            
+            const minR = Math.min(...rows);
+            const maxR = Math.max(...rows);
+            const minC = Math.min(...cols);
+            const maxC = Math.max(...cols);
+            
+            const spanR = (maxR - minR) + 1;
+            const spanC = (maxC - minC) + 1;
+
+            myGeometry = {
+                id: myId,
+                row: minR,
+                col: minC,
+                spanR: spanR,
+                spanC: spanC,
+                width: window.innerWidth,
+                height: window.innerHeight,
+                timestamp: firebase.database.ServerValue.TIMESTAMP
+            };
+
+            // Send to DB
+            devicesRef.child(myId).set(myGeometry).then(() => {
+                document.getElementById('setup-screen').style.display = 'none';
+                document.getElementById('dvd-logo').style.display = 'flex';
+                
+                // Handle resize
+                window.onresize = () => {
+                    devicesRef.child(myId).update({ 
+                        width: window.innerWidth, 
+                        height: window.innerHeight 
+                    });
+                };
+                
+                // Handle disconnect
+                devicesRef.child(myId).onDisconnect().remove();
+                
+                initSync();
             });
         }
 
-        function startAnimationLoop(startTime) {
+        // --- 4. ANIMATION LOOP ---
+        
+        const DVD_W = 100;
+        const DVD_H = 50;
+        const SPEED_X = 0.2; 
+        const SPEED_Y = 0.2; 
+
+        function initSync() {
+            syncRef.child('startTime').transaction(curr => curr || Date.now(), 
+            (err, committed, snap) => startLoop(snap.val() || Date.now()));
+        }
+
+        function startLoop(startTime) {
             const logo = document.getElementById('dvd-logo');
             const status = document.getElementById('status');
 
-            function loop() {
+            function frame() {
                 const now = Date.now();
                 const elapsed = now - startTime;
 
-                let colWidths = [0, 0, 0];
-                let rowHeights = [0, 0, 0];
+                // 1. Calculate the Virtual Wall Dimensions
+                // We assume the grid is made of flexible columns/rows.
+                // We find the widest device segment in each column.
+                let colWidths = Array(GRID_SIZE).fill(0);
+                let rowHeights = Array(GRID_SIZE).fill(0);
 
                 Object.values(allDevices).forEach(d => {
-                    if (d.width > colWidths[d.col]) colWidths[d.col] = d.width;
-                    if (d.height > rowHeights[d.row]) rowHeights[d.row] = d.height;
+                    // If device spans 2 columns, each column gets half its width
+                    const wPerCol = d.width / d.spanC;
+                    const hPerRow = d.height / d.spanR;
+
+                    for(let i=0; i<d.spanC; i++) {
+                        if (wPerCol > colWidths[d.col + i]) colWidths[d.col + i] = wPerCol;
+                    }
+                    for(let i=0; i<d.spanR; i++) {
+                        if (hPerRow > rowHeights[d.row + i]) rowHeights[d.row + i] = hPerRow;
+                    }
                 });
 
-                const totalWidth = colWidths.reduce((a, b) => a + b, 0);
-                const totalHeight = rowHeights.reduce((a, b) => a + b, 0);
+                const totalW = colWidths.reduce((a, b) => a + b, 0);
+                const totalH = rowHeights.reduce((a, b) => a + b, 0);
 
-                if (totalWidth === 0 || totalHeight === 0) { requestAnimationFrame(loop); return; }
+                if (totalW === 0) { requestAnimationFrame(frame); return; }
 
+                // 2. Calculate My Offset
                 let myOffsetX = 0;
-                for (let c = 0; c < myPosition.c; c++) myOffsetX += colWidths[c];
+                for (let c = 0; c < myGeometry.col; c++) myOffsetX += colWidths[c];
+                
                 let myOffsetY = 0;
-                for (let r = 0; r < myPosition.r; r++) myOffsetY += rowHeights[r];
+                for (let r = 0; r < myGeometry.row; r++) myOffsetY += rowHeights[r];
 
-                const maxX = totalWidth - DVD_WIDTH;
-                const maxY = totalHeight - DVD_HEIGHT;
+                // 3. Physics (Bounce)
+                const maxX = totalW - DVD_W;
+                const maxY = totalH - DVD_H;
 
-                const distX = (elapsed * SPEED_X);
-                const distY = (elapsed * SPEED_Y);
+                const distX = elapsed * SPEED_X;
+                const distY = elapsed * SPEED_Y;
 
-                const rawX = distX % (2 * maxX);
-                const globalX = rawX < maxX ? rawX : (2 * maxX) - rawX;
+                const rX = distX % (2 * maxX);
+                const globalX = rX < maxX ? rX : (2 * maxX) - rX;
 
-                const rawY = distY % (2 * maxY);
-                const globalY = rawY < maxY ? rawY : (2 * maxY) - rawY;
+                const rY = distY % (2 * maxY);
+                const globalY = rY < maxY ? rY : (2 * maxY) - rY;
 
+                // Color
                 const hue = (elapsed / 50) % 360;
                 logo.style.backgroundColor = `hsl(${hue}, 70%, 50%)`;
 
+                // 4. Transform
+                // Local = Global - Offset
                 const localX = globalX - myOffsetX;
                 const localY = globalY - myOffsetY;
 
                 logo.style.transform = `translate(${localX}px, ${localY}px)`;
-                status.innerText = `Pos: ${Math.round(globalX)},${Math.round(globalY)}`;
-
-                requestAnimationFrame(loop);
+                
+                // Debug status
+                status.innerText = `Wall: ${Math.round(totalW)}x${Math.round(totalH)} | Me: ${Math.round(myGeometry.width)}x${Math.round(myGeometry.height)}`;
+                
+                requestAnimationFrame(frame);
             }
-            requestAnimationFrame(loop);
+            requestAnimationFrame(frame);
         }
     </script>
 </body>
